@@ -1,36 +1,159 @@
 # ott-platform-ingestion-pipeline
 
-Studios or CMS operators upload mezzanines through FastAPI into S3 multipart.
+Ingestion pipeline for large video files on an OTT platform. It accepts a source
+video over HTTP, streams it into object storage as a resumable multipart upload,
+and keeps the object laid out so that transcoded renditions, extracted audio and
+subtitles can live alongside the original.
 
-Stream a file with `POST /api/v1/upload`. On failure retry with the same file,
-`upload_id`, and `key`. Status is `GET /api/v1/status`.
-`DELETE /api/v1/delete_all_parts` aborts every in-progress MPU in the bucket.
+The long-term goal is a Netflix-style ingestion path: upload once, then fan out
+into per-resolution segments that are ready for streaming.
 
-How to run: [docs/development.md](docs/development.md). Routes: [docs/api.md](docs/api.md).
-Target architecture (Postgres, packaging, `/v1`): [docs/HLD.md](docs/HLD.md).
+## High-level design
 
-## How it works
+```mermaid
+flowchart LR
+  Client -->|multipart upload| API[FastAPI]
+  API -->|source under uuid/source| S3[(MinIO / S3)]
+  API -->|ingestion metadata| PG[(Postgres)]
+  API -->|upload complete| MQ[[RabbitMQ]]
+  MQ --> Workers[Background workers]
+  Workers -->|video segments by resolution| S3
+  Workers -->|extracted audio| S3
+  Workers -->|subtitles| S3
+  Workers -->|job status| PG
+  S3 -->|uuid/processed/*| Stream[Streaming-ready assets]
+```
 
-1. Client `POST /api/v1/upload` with the file stream. The API creates an S3 MPU
-   at `{uuid}/source.{ext}` (or query `key`) and writes parts. On success it
-   completes the object.
-2. If S3 or the stream fails, the **502** body includes `upload_id` and `key`.
-   Client may `GET /api/v1/status?key=&upload_id=` then `POST` again with the
-   **same file**, `upload_id`, and `key`. The handler `seek`s past uploaded parts.
-3. `DELETE /api/v1/delete_all_parts` aborts every in-progress MPU in the bucket.
+Upload lands in object storage as the source file. When that finishes, the API
+publishes a message so workers can transcode video, extract audio, and write a
+separate subtitle file under the same UUID. Postgres holds metadata for the job
+while it runs.
 
-Open `/docs` after `uv run uvicorn app.main:app --reload`.
+## Status
 
-## Documentation
+Implemented today:
 
-| Document | What it covers |
-|---|---|
-| [Docs index](docs/Home.md) | Map of the notes |
-| [High Level Design](docs/HLD.md) | Target architecture |
-| [API](docs/api.md) | Current `/api/v1` routes |
-| [Development](docs/development.md) | Run locally, env |
-| [Storage](docs/storage.md) | Bucket and keys |
-| [Operations](docs/operations.md) | Local run and upload failures |
+- Multipart upload of `.mp4` / `.mkv` files into an S3-compatible bucket
+- Resuming an interrupted upload by replaying the same file with its `upload_id`
+- Inspecting and aborting in-flight multipart uploads
 
-Diagrams are Mermaid in Markdown. GitHub renders them natively; VS Code / Cursor
-preview needs the `bierner.markdown-mermaid` extension.
+Planned, not built yet:
+
+- Publishing a completion message to RabbitMQ
+- Background workers that transcode into multiple resolutions and extract audio
+  and subtitle tracks
+- Persisting ingestion metadata in Postgres (the container and the SQLAlchemy /
+  psycopg dependencies are already in place, but nothing writes to the database)
+
+## Tech stack
+
+FastAPI, boto3 against MinIO (S3-compatible locally, S3 in production), Postgres,
+and uv for dependency management. Python 3.12 or newer is required.
+
+## Storage layout
+
+A new upload gets a generated UUID prefix and the source object is written to:
+
+```
+<uuid>/source.<ext>
+```
+
+Derived outputs will be written under the same prefix, e.g. `<uuid>/processed/…`,
+so everything produced from one ingest stays addressable by a single ID. A caller
+that wants control over placement can pass an explicit `key` instead.
+
+## Getting started
+
+Start MinIO and Postgres:
+
+```bash
+docker compose up -d
+```
+
+MinIO's console is at http://localhost:9001 (`minioadmin` / `minioadmin`). Create
+the bucket named in `S3_BUCKET` before uploading — the service does not create it.
+
+Create a `.env` file in the repository root:
+
+```bash
+S3_ENDPOINT_URL="http://localhost:9000"
+S3_ACCESS_KEY="minioadmin"
+S3_SECRET_KEY="minioadmin"
+S3_BUCKET="videos"
+S3_REGION="us-east-1"
+PART_SIZE_BYTES=8388608
+```
+
+Install dependencies and run the API:
+
+```bash
+uv sync
+uv run uvicorn app.main:app --reload
+```
+
+The service listens on http://localhost:8000 and redirects `/` to the interactive
+docs at `/docs`.
+
+## Configuration
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `S3_ENDPOINT_URL` | yes | — | S3 or MinIO endpoint. An `http`/`https` value switches boto3 to path-style addressing. |
+| `S3_ACCESS_KEY` | yes | — | Access key. |
+| `S3_SECRET_KEY` | yes | — | Secret key. |
+| `S3_REGION` | yes | — | Region name. |
+| `S3_BUCKET` | yes | — | Destination bucket, which must already exist. |
+| `PART_SIZE_BYTES` | yes | — | Size of each multipart chunk in bytes. Local example uses `8388608` (8 MiB); raise this for larger files if you want fewer parts. |
+
+## API
+
+All routes are served under `/api/v1`.
+
+### `POST /upload`
+
+Multipart form upload of a single `file`. The filename extension must be `mp4` or
+`mkv`. Optional query parameters:
+
+- `key` — target object key; defaults to `<uuid>/source.<ext>`
+- `upload_id` — resume an existing multipart upload instead of starting one
+
+The file is read in `PART_SIZE_BYTES` chunks and each chunk is sent as a part. On
+success the multipart upload is completed and the response returns the
+`upload_id`, `key`, and `parts_uploaded`.
+
+If a storage error interrupts the transfer, the response is a `502` whose detail
+carries the `upload_id`, `key`, and the number of parts that made it. Retrying
+with the same file plus that `key` and `upload_id` seeks past the already-uploaded
+parts and continues from there.
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/upload" \
+  -F "file=@/path/to/movie.mp4"
+```
+
+### `GET /status`
+
+Lists the parts already uploaded for a given `key` and `upload_id`.
+
+```bash
+curl "http://localhost:8000/api/v1/status?key=<uuid>/source.mp4&upload_id=<id>"
+```
+
+### `DELETE /delete_all_parts`
+
+Aborts every in-flight multipart upload in the bucket and discards their parts.
+This is a cleanup helper for development; it does not touch completed objects.
+
+## Project layout
+
+```
+app/
+  main.py            FastAPI app and router wiring
+  settings.py        Pydantic settings loaded from .env
+  api/v1/uploads.py  Upload, status, and cleanup endpoints
+docker-compose.yml   MinIO and Postgres for local development
+```
+
+## License
+
+See [LICENSE](LICENSE).

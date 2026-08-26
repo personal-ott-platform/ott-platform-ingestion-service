@@ -16,6 +16,6 @@ class Settings(BaseSettings):
     s3_secret_key: str
     s3_region: str
     s3_bucket: str
-    part_size_bytes: int = 8 * 1024 * 1024
+    part_size_bytes: int
 
 settings = Settings()
