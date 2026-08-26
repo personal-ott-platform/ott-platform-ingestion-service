@@ -1,6 +1,14 @@
+"""
+This module contains the settings for the uploads service.
+"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+ALLOWED_FILE_EXTENSIONS = ['mp4', 'mkv']
+
 class Settings(BaseSettings):
+    """
+    Settings for the uploads service.
+    """
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
 
     s3_endpoint_url: str
