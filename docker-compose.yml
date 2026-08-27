@@ -8,10 +8,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - RABBITMQ_HOST=ingestion-rabbitmq
-      - RABBITMQ_PORT=5672
-      - RABBITMQ_USER=rabbitmqadmin
-      - RABBITMQ_PASSWORD=rabbitmqadmin
+      - RABBITMQ_URL=amqp://rabbitmqadmin:rabbitmqadmin@ingestion-rabbitmq:5672/
+      - RABBITMQ_QUEUE=video.processing
       - S3_ENDPOINT_URL=http://ingestion-minio:9000
       - S3_ACCESS_KEY=minioadmin
       - S3_SECRET_KEY=minioadmin
