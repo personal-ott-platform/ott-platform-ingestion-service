@@ -16,18 +16,21 @@ flowchart LR
   API -->|source under uuid/source| S3[(MinIO / S3)]
   API -->|ingestion metadata| PG[(Postgres)]
   API -->|upload complete| MQ[[RabbitMQ]]
-  MQ --> Workers[Background workers]
-  Workers -->|video segments by resolution| S3
-  Workers -->|extracted audio| S3
-  Workers -->|subtitles| S3
-  Workers -->|job status| PG
+  MQ --> Disp[Dispatcher]
+  Disp -->|one Job per movie| K8s[Kubernetes Job]
+  K8s -->|video segments by resolution| S3
+  K8s -->|extracted audio| S3
+  K8s -->|subtitles| S3
+  K8s -->|job status| PG
   S3 -->|uuid/processed/*| Stream[Streaming-ready assets]
 ```
 
 Upload lands in object storage as the source file. When that finishes, the API
-publishes a message so workers can transcode video, extract audio, and write a
-separate subtitle file under the same UUID. Postgres holds metadata for the job
-while it runs.
+records the ingest in Postgres and publishes `{ job_id }` to RabbitMQ. A
+dispatcher consumes that message and creates **one Kubernetes Job per movie**.
+The Job runs ffmpeg (renditions, audio, subtitles) under the same UUID, then
+updates job status. RabbitMQ only wakes the dispatcher; it does not run the
+encode. Postgres remains the source of truth for the ingest.
 
 ## Status
 
@@ -39,16 +42,18 @@ Implemented today:
 
 Planned, not built yet:
 
-- Publishing a completion message to RabbitMQ
-- Background workers that transcode into multiple resolutions and extract audio
-  and subtitle tracks
 - Persisting ingestion metadata in Postgres (the container and the SQLAlchemy /
   psycopg dependencies are already in place, but nothing writes to the database)
+- Publishing `{ job_id }` to RabbitMQ when an upload completes
+- A dispatcher that creates one Kubernetes Job per movie
+- Job pods that transcode into multiple resolutions and extract audio and
+  subtitle tracks
 
 ## Tech stack
 
 FastAPI, boto3 against MinIO (S3-compatible locally, S3 in production), Postgres,
-and uv for dependency management. Python 3.12 or newer is required.
+RabbitMQ (dispatch only), Kubernetes Jobs for processing, and uv for dependency
+management. Python 3.12 or newer is required.
 
 ## Storage layout
 
