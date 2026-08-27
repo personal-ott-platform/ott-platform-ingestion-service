@@ -7,10 +7,17 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.79",
     "fastapi>=0.141.1",
+    "pika>=1.4.4",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
     "python-multipart>=0.0.32",
     "sqlalchemy>=2.0.52",
     "uvicorn[standard]>=0.52.4",
+]
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "pylint>=4.0.7",
 ]
