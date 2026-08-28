@@ -6,6 +6,9 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 from app.api.v1.uploads import router as uploads_router
+from app.logging_config import setup_logging
+
+setup_logging()
 
 app = FastAPI(
     title="Video Ingestion Pipeline",
