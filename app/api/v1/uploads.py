@@ -11,7 +11,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.settings import settings, ALLOWED_FILE_EXTENSIONS
-
+from app.rabbitmq import mq_client
 
 router = APIRouter(prefix='/api/v1', tags=['uploads'])
 
@@ -118,11 +118,18 @@ def upload(
                 "message": "Upload interrupted; retry with the same file and upload_id",
                 "upload_id": upload_id,
                 "key": key,
-                "parts_uploaded": len(parts),
             },
         ) from e
     finally:
         file.file.close()
+
+    mq_client.send_message(
+        exchange=settings.rabbitmq_queue,
+        routing_key=settings.rabbitmq_queue,
+        message={
+            'key': key,
+        }
+    )
 
     return {
         "upload_id": upload_id,
