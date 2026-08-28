@@ -3,6 +3,7 @@ This module contains the API endpoints for the uploads service.
 """
 from typing import Optional
 import uuid
+import logging
 
 from fastapi import APIRouter, HTTPException, File, UploadFile, Query
 from fastapi.responses import JSONResponse
@@ -12,6 +13,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from app.settings import settings, ALLOWED_FILE_EXTENSIONS
 from app.rabbitmq import mq_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/api/v1', tags=['uploads'])
 
@@ -43,9 +46,11 @@ def upload(
         The response containing the upload information.
     """
     if file.filename is None:
+        logger.error("File name is required")
         raise HTTPException(status_code=400, detail="File name is required")
     suffix = file.filename.split('.')[-1]
     if suffix not in ALLOWED_FILE_EXTENSIONS:
+        logger.error("Invalid file extension")
         raise HTTPException(status_code=400, detail="Invalid file extension")
     key = key or f"{uuid.uuid4()}/source.{suffix}"
     upload_id = upload_id or None
@@ -53,6 +58,7 @@ def upload(
 
     try:
         if upload_id is None:
+            logger.info("Creating new multipart upload for key %s", key)
             resp = s3.create_multipart_upload(
                 Bucket=settings.s3_bucket,
                 Key=key,
@@ -63,6 +69,7 @@ def upload(
             parts = []
             part_number = 1
         else:
+            logger.info("Resuming multipart upload for key %s", key)
             parts = [
                 {
                     "PartNumber": part["PartNumber"],
@@ -97,6 +104,7 @@ def upload(
             part_number += 1
 
         if not parts:
+            logger.error("No parts uploaded for key %s", key)
             s3.abort_multipart_upload(
                 Bucket=settings.s3_bucket,
                 Key=key,
@@ -104,6 +112,7 @@ def upload(
             )
             raise HTTPException(status_code=500, detail="No parts uploaded")
 
+        logger.info("Completing multipart upload for key %s", key)
         s3.complete_multipart_upload(
             Bucket=settings.s3_bucket,
             Key=key,
@@ -112,6 +121,7 @@ def upload(
         )
 
     except (ClientError, BotoCoreError) as e:
+        logger.error("Error uploading file for key %s", key, exc_info=True)
         raise HTTPException(
             status_code=502,
             detail={
@@ -123,6 +133,7 @@ def upload(
     finally:
         file.file.close()
 
+    logger.info("Sending message to RabbitMQ for key %s", key)
     mq_client.send_message(
         exchange=settings.rabbitmq_queue,
         routing_key=settings.rabbitmq_queue,
@@ -130,6 +141,7 @@ def upload(
             'key': key,
         }
     )
+    logger.info("Message sent to RabbitMQ for key %s", key)
 
     return {
         "upload_id": upload_id,
@@ -146,6 +158,7 @@ def status(
     Get the status of a file upload.
     """
     try:
+        logger.info("Getting upload status for key %s", key)
         parts = s3.list_parts(
             Bucket=settings.s3_bucket,
             Key=key,
@@ -153,6 +166,7 @@ def status(
         )["Parts"]
         return JSONResponse(status_code=200, content={"message": "Upload status", "parts": parts})
     except (ClientError, BotoCoreError) as e:
+        logger.error("Error getting upload status for key %s", key, exc_info=True)
         raise HTTPException(
             status_code=502,
             detail=f"Upload status: {e}"
@@ -170,10 +184,11 @@ def delete():
     )['Uploads']
 
     for part in all_parts:
+        logger.info("Deleting part %s", part)
         s3.abort_multipart_upload(
             Bucket=settings.s3_bucket,
             Key=part['Key'],
             UploadId=part['UploadId']
         )
-
+    logger.info("All uploads deleted")
     return JSONResponse(status_code=200, content={"message": "All uploads deleted"})
