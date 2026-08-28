@@ -5,9 +5,11 @@ RabbitMQ client for the ingestion service.
 import json
 import threading
 import pika
+import logging
 
 from app.settings import settings
 
+logger = logging.getLogger(__name__)
 
 class RabbitMQClient:
     """
@@ -45,11 +47,13 @@ class RabbitMQClient:
             self.connect()
         elif self.channel is None or self.channel.is_closed:
             self.channel = self.connection.channel()
+        logger.info("Connection and channel established")
 
     def send_message(self, exchange, routing_key, message):
         """
         Send a message to the RabbitMQ server.
         """
+        logger.info("Sending message to RabbitMQ for exchange %s and routing key %s", exchange, routing_key)
         with self._lock:
             self._ensure_connected()
             self.channel.basic_publish(
