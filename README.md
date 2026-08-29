@@ -15,9 +15,7 @@ flowchart LR
   Client -->|multipart upload| API[FastAPI]
   API -->|source under uuid/source| S3[(MinIO / S3)]
   API -->|ingestion metadata| PG[(Postgres)]
-  API -->|upload complete| MQ[[RabbitMQ]]
-  MQ --> Disp[Dispatcher]
-  Disp -->|one Job per movie| K8s[Kubernetes Job]
+  API -->|upload complete: one Job per movie| K8s[Kubernetes Job]
   K8s -->|video segments by resolution| S3
   K8s -->|extracted audio| S3
   K8s -->|subtitles| S3
@@ -26,11 +24,11 @@ flowchart LR
 ```
 
 Upload lands in object storage as the source file. When that finishes, the API
-records the ingest in Postgres and publishes `{ job_id }` to RabbitMQ. A
-dispatcher consumes that message and creates **one Kubernetes Job per movie**.
+records the ingest in Postgres and creates **one Kubernetes Job per movie**.
 The Job runs ffmpeg (renditions, audio, subtitles) under the same UUID, then
-updates job status. RabbitMQ only wakes the dispatcher; it does not run the
-encode. Postgres remains the source of truth for the ingest.
+updates job status. Volume is small (a handful of titles per day), so the API
+talks to the Kubernetes API directly after the multipart upload completes.
+Postgres remains the source of truth for the ingest.
 
 ## Status
 
@@ -42,18 +40,17 @@ Implemented today:
 
 Planned, not built yet:
 
-- Persisting ingestion metadata in Postgres (the container and the SQLAlchemy /
-  psycopg dependencies are already in place, but nothing writes to the database)
-- Publishing `{ job_id }` to RabbitMQ when an upload completes
-- A dispatcher that creates one Kubernetes Job per movie
+- Persisting ingestion metadata in Postgres (SQLAlchemy / psycopg are already
+  in the project, but nothing writes to the database)
+- Creating one Kubernetes Job per movie when an upload completes
 - Job pods that transcode into multiple resolutions and extract audio and
   subtitle tracks
 
 ## Tech stack
 
 FastAPI, boto3 against MinIO (S3-compatible locally, S3 in production), Postgres,
-RabbitMQ (dispatch only), Kubernetes Jobs for processing, and uv for dependency
-management. Python 3.12 or newer is required.
+Kubernetes Jobs for processing, and uv for dependency management. Python 3.12 or
+newer is required.
 
 ## Storage layout
 
@@ -69,7 +66,7 @@ that wants control over placement can pass an explicit `key` instead.
 
 ## Getting started
 
-Start MinIO and Postgres:
+Start MinIO:
 
 ```bash
 docker compose up -d
@@ -156,7 +153,7 @@ app/
   main.py            FastAPI app and router wiring
   settings.py        Pydantic settings loaded from .env
   api/v1/uploads.py  Upload, status, and cleanup endpoints
-docker-compose.yml   MinIO and Postgres for local development
+docker-compose.yml   MinIO for local development
 ```
 
 ## License
