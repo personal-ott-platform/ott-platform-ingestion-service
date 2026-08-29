@@ -18,7 +18,5 @@ class Settings(BaseSettings):
     s3_region: str = os.getenv('S3_REGION')
     s3_bucket: str = os.getenv('S3_BUCKET')
     part_size_bytes: int = os.getenv('PART_SIZE_BYTES')
-    rabbitmq_url: str = os.getenv('RABBITMQ_URL')
-    rabbitmq_queue: str = os.getenv('RABBITMQ_QUEUE')
 
 settings = Settings()

@@ -12,7 +12,6 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.settings import settings, ALLOWED_FILE_EXTENSIONS
-from app.rabbitmq import mq_client
 
 logger = logging.getLogger(__name__)
 
@@ -132,17 +131,8 @@ def upload(
         ) from e
     finally:
         file.file.close()
-
-    logger.info("Sending message to RabbitMQ for key %s", key)
-    mq_client.send_message(
-        exchange=settings.rabbitmq_queue,
-        routing_key=settings.rabbitmq_queue,
-        message={
-            'key': key,
-        }
-    )
-    logger.info("Message sent to RabbitMQ for key %s", key)
-
+    
+    logger.info("Upload completed for key %s", key)
     return {
         "upload_id": upload_id,
         "key": key,
@@ -173,6 +163,7 @@ def status(
         ) from e
 
 
+# remove this endpoint after development
 @router.delete("/delete_all_parts")
 def delete():
     """
