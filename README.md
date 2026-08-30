@@ -15,9 +15,7 @@ flowchart LR
   Client -->|multipart upload| API[FastAPI]
   API -->|source under uuid/source| S3[(MinIO / S3)]
   API -->|ingestion metadata| PG[(Postgres)]
-  API -->|upload complete| MQ[[RabbitMQ]]
-  MQ --> Disp[Dispatcher]
-  Disp -->|one Job per movie| K8s[Kubernetes Job]
+  API -->|upload complete: one Job per movie| K8s[Kubernetes Job]
   K8s -->|video segments by resolution| S3
   K8s -->|extracted audio| S3
   K8s -->|subtitles| S3
@@ -26,11 +24,11 @@ flowchart LR
 ```
 
 Upload lands in object storage as the source file. When that finishes, the API
-records the ingest in Postgres and publishes `{ job_id }` to RabbitMQ. A
-dispatcher consumes that message and creates **one Kubernetes Job per movie**.
+records the ingest in Postgres and creates **one Kubernetes Job per movie**.
 The Job runs ffmpeg (renditions, audio, subtitles) under the same UUID, then
-updates job status. RabbitMQ only wakes the dispatcher; it does not run the
-encode. Postgres remains the source of truth for the ingest.
+updates job status. Volume is small (a handful of titles per day), so the API
+talks to the Kubernetes API directly after the multipart upload completes.
+Postgres remains the source of truth for the ingest.
 
 ## Status
 
@@ -39,21 +37,20 @@ Implemented today:
 - Multipart upload of `.mp4` / `.mkv` files into an S3-compatible bucket
 - Resuming an interrupted upload by replaying the same file with its `upload_id`
 - Inspecting and aborting in-flight multipart uploads
+- Creating one Kubernetes Job per movie when an upload completes (`K8S_ENABLED`)
+- A worker image that transcodes HLS renditions, extracts audio, and dumps
+  subtitle tracks back under `<uuid>/processed/`
 
 Planned, not built yet:
 
-- Persisting ingestion metadata in Postgres (the container and the SQLAlchemy /
-  psycopg dependencies are already in place, but nothing writes to the database)
-- Publishing `{ job_id }` to RabbitMQ when an upload completes
-- A dispatcher that creates one Kubernetes Job per movie
-- Job pods that transcode into multiple resolutions and extract audio and
-  subtitle tracks
+- Persisting ingestion metadata in Postgres (SQLAlchemy / psycopg are already
+  in the project, but nothing writes to the database)
 
 ## Tech stack
 
 FastAPI, boto3 against MinIO (S3-compatible locally, S3 in production), Postgres,
-RabbitMQ (dispatch only), Kubernetes Jobs for processing, and uv for dependency
-management. Python 3.12 or newer is required.
+Kubernetes Jobs for processing, and uv for dependency management. Python 3.12 or
+newer is required.
 
 ## Storage layout
 
@@ -69,7 +66,7 @@ that wants control over placement can pass an explicit `key` instead.
 
 ## Getting started
 
-Start MinIO and Postgres:
+Start MinIO:
 
 ```bash
 docker compose up -d
@@ -87,6 +84,7 @@ S3_SECRET_KEY="minioadmin"
 S3_BUCKET="videos"
 S3_REGION="us-east-1"
 PART_SIZE_BYTES=8388608
+K8S_ENABLED=false
 ```
 
 Install dependencies and run the API:
@@ -109,6 +107,9 @@ docs at `/docs`.
 | `S3_REGION` | yes | — | Region name. |
 | `S3_BUCKET` | yes | — | Destination bucket, which must already exist. |
 | `PART_SIZE_BYTES` | yes | — | Size of each multipart chunk in bytes. Local example uses `8388608` (8 MiB); raise this for larger files if you want fewer parts. |
+| `K8S_ENABLED` | no | `false` | When `true`, create a Kubernetes Job after a successful upload. Docker Compose leaves this off (no kube API). |
+| `K8S_NAMESPACE` | no | `default` | Namespace where ingest Jobs are created. |
+| `K8S_WORKER_IMAGE` | no | `ingest-worker:latest` | Image the Job runs (`worker/Dockerfile`). |
 
 ## API
 
@@ -123,8 +124,28 @@ Multipart form upload of a single `file`. The filename extension must be `mp4` o
 - `upload_id` — resume an existing multipart upload instead of starting one
 
 The file is read in `PART_SIZE_BYTES` chunks and each chunk is sent as a part. On
-success the multipart upload is completed and the response returns the
-`upload_id`, `key`, and `parts_uploaded`.
+success the multipart upload is completed. If `K8S_ENABLED` is true, the API
+then creates a Job named `ingest-<uuid>` that downloads the source object and
+writes derivatives under `<uuid>/processed/`:
+
+- HLS video ladders at 1080p / 720p / 480p (skips rungs taller than the source)
+- Per-audio-stream AAC (`.m4a`) and MP3
+- Embedded subtitle streams as WebVTT
+
+The response returns the `upload_id`, `key`, `parts_uploaded`, and `job_name`
+(or `null` when Jobs are disabled). If the object is stored but Job creation
+fails, the response is a `502` with the same `key` so processing can be retried
+without re-uploading.
+
+Build and load the worker image into the cluster before enabling Jobs:
+
+```bash
+docker build -t ingest-worker:latest -f worker/Dockerfile worker
+kubectl apply -f k8s/rbac.yaml
+```
+
+The API Deployment must use the `ingestion-api` ServiceAccount from that
+manifest (or an equivalent that can `create`/`get` Jobs).
 
 If a storage error interrupts the transfer, the response is a `502` whose detail
 carries the `upload_id`, `key`, and the number of parts that made it. Retrying
@@ -155,8 +176,13 @@ This is a cleanup helper for development; it does not touch completed objects.
 app/
   main.py            FastAPI app and router wiring
   settings.py        Pydantic settings loaded from .env
+  k8s.py             Create a Kubernetes ingest Job
   api/v1/uploads.py  Upload, status, and cleanup endpoints
-docker-compose.yml   MinIO and Postgres for local development
+worker/
+  Dockerfile         ffmpeg + boto3 image used by the Job
+  transcode.py       Download, transcode, upload processed assets
+k8s/rbac.yaml        ServiceAccount/Role so the API can create Jobs
+docker-compose.yml   MinIO for local development
 ```
 
 ## License

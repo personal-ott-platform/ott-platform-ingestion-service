@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.79",
     "fastapi>=0.141.1",
-    "pika>=1.4.4",
+    "kubernetes>=36.0.3",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
